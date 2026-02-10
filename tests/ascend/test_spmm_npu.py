@@ -48,18 +48,18 @@ class GCN(nn.Module):
         h = self.layer2(g, h, norm)
         return h
 
-def test_gcn_ascend():
+
+def test_gcn_ascend(device):
     print(f"DGL Version: {dgl.__version__}")
     print(f"PyTorch Version: {torch.__version__}")
-
-    # Check for NPU availability
-    if not hasattr(torch, 'npu') or not torch.npu.is_available():
-        print("Error: NPU device is not available.")
-        return
-
-    device = torch.device("npu:0")
-    torch.npu.set_device(device)
     print(f"Using device: {device}")
+
+    # 仅在使用 NPU 时检查和设置 NPU 设备
+    if device.type == "npu":
+        if not hasattr(torch, 'npu') or not torch.npu.is_available():
+            print("Error: NPU device is not available.")
+            return
+        torch.npu.set_device(device)
 
     # 1. Load Cora Dataset
     print("Loading Cora dataset...")
@@ -82,6 +82,7 @@ def test_gcn_ascend():
     # Backward pass needs the reverse graph. If forward uses CSC (in-edge aggregation),
     # backward might need CSR (out-edge aggregation) or the transpose of current graph.
     print("Pre-converting graph format on CPU...")
+    g = g.int()
     g = g.formats(['csc', 'csr'])
     g.create_formats_()
 
@@ -90,15 +91,16 @@ def test_gcn_ascend():
     degs = g.in_degrees().float().clamp(min=1)
     norm = torch.pow(degs, -0.5)
     
-    # 4. Move data to NPU
-    print("Moving graph and features to NPU...")
+    # 4. Move data to target device
+    print("Moving graph and features to device...")
     g = g.to(device)
     features = features.to(device)
     norm = norm.to(device).unsqueeze(1) # Move normalization coefficients to NPU
     
-    # Synchronize to ensure all data is transferred
-    # torch.npu.synchronize()
-    print("NPU synchronization completed.")
+    # Synchronize to ensure all data is transferred (only for NPU)
+    if device.type == "npu" and hasattr(torch, 'npu'):
+        # torch.npu.synchronize()
+        print("NPU synchronization completed.")
 
     # 4. Initialize Model
     model = GCN(in_feats, hidden_size, out_feats).to(device)
@@ -111,7 +113,7 @@ def test_gcn_ascend():
     val_mask = g.ndata['val_mask'].to(device)
     labels = labels.to(device)
 
-    print("Model initialized on NPU. Starting training...")
+    print("Model initialized on device. Starting training...")
 
     # 5. Training Loop
     try:
@@ -145,8 +147,9 @@ def test_gcn_ascend():
             
             print(f"Epoch {epoch:03d} | Loss: {loss.item():.4f} | Val Acc: {val_acc:.4f} | Time: {epoch_time:.2f} ms")
             
-        torch.npu.synchronize()
-        print(f"Training completed in {(time.time() - total_start):.2f} s")
+        if device.type == "npu" and hasattr(torch, 'npu'):
+            torch.npu.synchronize()
+        print(f"Training completed on {device} in {(time.time() - total_start):.2f} s")
         print(f"Final Output shape: {logits.shape}")
 
     except Exception as e:
@@ -156,4 +159,13 @@ def test_gcn_ascend():
 
 if __name__ == "__main__":
     os.environ['DGLBACKEND'] = 'pytorch'
-    test_gcn_ascend()
+
+    # 先在 CPU 上运行
+    print("==== Running GCN on CPU ====")
+    cpu_device = torch.device("cpu")
+    test_gcn_ascend(cpu_device)
+
+    # 再在 NPU:1 上运行
+    print("==== Running GCN on NPU:1 ====")
+    npu_device = torch.device("npu:1")
+    test_gcn_ascend(npu_device)

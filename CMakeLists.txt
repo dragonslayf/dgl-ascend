@@ -178,6 +178,74 @@ if(USE_ASCEND)
       # Try with just the library name if find_library fails
       list(APPEND DGL_LINKER_LIBS ascendcl)
     endif()
+    
+    # Build AscendC kernel library for all operators
+    # Find AscendC cmake directory
+    if(EXISTS ${ASCEND_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
+      set(ASCENDC_CMAKE_DIR ${ASCEND_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
+    elseif(EXISTS ${ASCEND_PATH}/tools/tikcpp/ascendc_kernel_cmake)
+      set(ASCENDC_CMAKE_DIR ${ASCEND_PATH}/tools/tikcpp/ascendc_kernel_cmake)
+    else()
+      message(WARNING "ascendc_kernel_cmake not found, AscendC kernel will not be built")
+      set(ASCENDC_CMAKE_DIR "")
+    endif()
+    
+    if(ASCENDC_CMAKE_DIR)
+      # Set ASCEND_CANN_PACKAGE_PATH for AscendC kernel compilation
+      # This is required by ascendc.cmake
+      if(NOT DEFINED ASCEND_CANN_PACKAGE_PATH)
+        set(ASCEND_CANN_PACKAGE_PATH "${ASCEND_PATH}" CACHE STRING "ASCEND CANN package installation directory")
+      endif()
+      message(STATUS "Using ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
+      
+      # Set SOC_VERSION for AscendC kernel compilation
+      # Can be set via CMake -DSOC_VERSION or environment variable
+      if(NOT DEFINED SOC_VERSION)
+        if(DEFINED ENV{SOC_VERSION})
+          set(SOC_VERSION $ENV{SOC_VERSION} CACHE STRING "Ascend SoC version")
+        else()
+          set(SOC_VERSION "Ascend910B4" CACHE STRING "Ascend SoC version (e.g., Ascend910B, Ascend910B4)")
+        endif()
+      endif()
+      message(STATUS "Using SOC_VERSION: ${SOC_VERSION}")
+      
+      # Ensure CMAKE_BUILD_TYPE is set for AscendC kernel compilation
+      # AscendC merge scripts require a valid build type
+      # Map DGL's BUILD_TYPE to CMAKE_BUILD_TYPE
+      if(NOT CMAKE_BUILD_TYPE)
+        if(BUILD_TYPE STREQUAL "dev")
+          set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Build type" FORCE)
+        else()
+          set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+        endif()
+        message(STATUS "CMAKE_BUILD_TYPE not set, mapping BUILD_TYPE=${BUILD_TYPE} to CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
+      endif()
+      message(STATUS "Using CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE} for AscendC kernels")
+      
+      include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
+      
+      # Automatically discover all AscendC kernel files (*_kernel.cpp pattern)
+      # This allows easy addition of new operators by simply adding new kernel files
+      file(GLOB ASCENDC_KERNEL_FILES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/array/ascend/*_kernel.cpp"
+      )
+      
+      if(ASCENDC_KERNEL_FILES)
+        # List all found kernel files for debugging
+        message(STATUS "Found AscendC kernel files:")
+        foreach(kernel_file ${ASCENDC_KERNEL_FILES})
+          get_filename_component(kernel_name ${kernel_file} NAME)
+          message(STATUS "  - ${kernel_name}")
+        endforeach()
+        
+        message(STATUS "Building AscendC kernel library (dgl_ascendc_kernels) as static library")
+        # Build as static library to directly integrate into dgl
+        ascendc_library(dgl_ascendc_kernels STATIC ${ASCENDC_KERNEL_FILES})
+        list(APPEND DGL_LINKER_LIBS dgl_ascendc_kernels)
+      else()
+        message(STATUS "No AscendC kernel files found (looking for *_kernel.cpp in src/array/ascend/)")
+      endif()
+    endif()
   else()
     message(WARNING "Ascend toolkit not found at ${ASCEND_PATH}, building without ACL support")
   endif()

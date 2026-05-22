@@ -14,6 +14,18 @@ try:
 except ImportError:
     pass
 
+
+def pad_feature_dim_to_32bytes(features: torch.Tensor) -> torch.Tensor:
+    """Pad feature dim (last dim) to 32-byte alignment."""
+    feat_dim = features.shape[1]
+    dtype_bytes = features.element_size()
+    aligned_feat_dim = ((feat_dim * dtype_bytes + 31) // 32) * 32 // dtype_bytes
+    if aligned_feat_dim == feat_dim:
+        return features
+
+    pad_cols = aligned_feat_dim - feat_dim
+    return F.pad(features, (0, pad_cols), mode="constant", value=0)
+
 class GCNLayer(nn.Module):
     def __init__(self, in_feats, out_feats):
         super(GCNLayer, self).__init__()
@@ -68,6 +80,8 @@ def test_gcn_ascend(device):
     g = data[0]
 
     features = g.ndata['feat']
+    original_in_feats = features.shape[1]
+    features = pad_feature_dim_to_32bytes(features)
     labels = g.ndata['label']
 
     in_feats = features.shape[1]
@@ -75,7 +89,10 @@ def test_gcn_ascend(device):
     out_feats = data.num_classes
 
     print(f"Graph loaded. Num nodes: {g.num_nodes()}, Num edges: {g.num_edges()}")
-    print(f"Features shape: {features.shape}, Num classes: {out_feats}")
+    print(
+        f"Features shape: {features.shape} (original: {original_in_feats}), "
+        f"Num classes: {out_feats}"
+    )
 
     # 2. Prepare graph formats on CPU (Crucial for bypassing COOToCSR not implemented on Ascend)
     # Also create the CSR format which is the transpose of CSC.
@@ -166,6 +183,6 @@ if __name__ == "__main__":
     test_gcn_ascend(cpu_device)
 
     # 再在 NPU:1 上运行
-    print("==== Running GCN on NPU:1 ====")
-    npu_device = torch.device("npu:1")
+    print("==== Running GCN on NPU:7 ====")
+    npu_device = torch.device("npu:7")
     test_gcn_ascend(npu_device)

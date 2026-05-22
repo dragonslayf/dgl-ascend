@@ -14,150 +14,156 @@ struct SpmmSumTilingData {
 #include "kernel_operator.h"
 
 constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t ACCUM_BUFFER_NUM = 4;
 constexpr uint32_t ALIGN_BYTES = 32; 
 constexpr uint32_t FLOATS_PER_ALIGN = ALIGN_BYTES / sizeof(float);  // 8 floats per 32 bytes
-constexpr uint32_t UPMEMORY_SIZE = 23000;  // Default batch size for feature vectors
+constexpr uint32_t UINT32_PER_ALIGN = ALIGN_BYTES / sizeof(uint32_t);
+// constexpr uint32_t UB_TOTAL_SIZE = 192 * 1024; 
+constexpr uint32_t UB_TOTAL_SIZE = 192 * 1024; 
+constexpr uint32_t UB_RESERVED = 2048; 
+constexpr uint32_t UB_AVAILABLE = UB_TOTAL_SIZE - UB_RESERVED;
 
 // AscendC kernel for SpMM with sum reduction
 class KernelSpmmSum {
 public:
     __aicore__ inline KernelSpmmSum() {}
+    
     // Initialize kernel with CSR matrix and dense matrix pointers
-    __aicore__ inline void Init(GM_ADDR row_ptr, GM_ADDR col_ind, 
+    __aicore__ inline void Init(GM_ADDR row_ptr, GM_ADDR col_ind,
                                 GM_ADDR dense_matrix, GM_ADDR output,
                                 uint32_t numSparseRows, uint32_t numSparseCols, uint32_t numDenseCols, 
                                 uint32_t nnz)
     {
         this->numSparseRows = numSparseRows;
         this->numSparseCols = numSparseCols;
-        this->numDenseCols =numDenseCols;
+        this->numDenseCols = numDenseCols;
         this->nnz = nnz;
-        
-        this->alignedDenseCols = ((numDenseCols + FLOATS_PER_ALIGN - 1) / FLOATS_PER_ALIGN) * FLOATS_PER_ALIGN;
-        this->batchSize = UPMEMORY_SIZE / numDenseCols;
-        
-        this->alignedPart = (numDenseCols / FLOATS_PER_ALIGN) * FLOATS_PER_ALIGN;
-        this->remainder = numDenseCols - this->alignedPart;
-        this->useAlignedCopy = (this->remainder == 0);
-        
+        // 划分每个AIV执行的行范围
         uint32_t totalBlocks = AscendC::GetBlockNum();
         uint32_t blockIdx = AscendC::GetBlockIdx();
         uint32_t rowsPerBlock = (numSparseRows + totalBlocks - 1) / totalBlocks;
         this->startRow = blockIdx * rowsPerBlock;
         this->endRow = this->startRow + rowsPerBlock > numSparseRows ? numSparseRows : this->startRow + rowsPerBlock;
         
+        uint32_t localRows = this->endRow > this->startRow ? (this->endRow - this->startRow) : 0;
+        if (localRows > 0) {
+            this->alignedStartRow = (this->startRow / UINT32_PER_ALIGN) * UINT32_PER_ALIGN;
+            uint32_t alignedEndRow = ((this->endRow + 1 + UINT32_PER_ALIGN - 1) / UINT32_PER_ALIGN) * UINT32_PER_ALIGN;
+            this->rowPtrAlignedElements = alignedEndRow - this->alignedStartRow;
+            this->rowPtrOffset = this->startRow - this->alignedStartRow;
+        } else {
+            this->rowPtrAlignedElements = UINT32_PER_ALIGN;
+            this->rowPtrOffset = 0;
+            this->alignedStartRow = 0;
+        }
+        uint32_t rowPtrBytes = this->rowPtrAlignedElements * sizeof(uint32_t);
         rowPtrGm.SetGlobalBuffer((__gm__ uint32_t *)row_ptr, numSparseRows + 1);
-        colIndGm.SetGlobalBuffer((__gm__ uint32_t *)col_ind, nnz);
         denseGm.SetGlobalBuffer((__gm__ float *)dense_matrix, numSparseCols * numDenseCols);
         outputGm.SetGlobalBuffer((__gm__ float *)output, numSparseRows * numDenseCols);
-        
-        uint32_t alignedBufferSize = alignedDenseCols * sizeof(float);
-        uint32_t batchBufferSize = this->batchSize * alignedDenseCols * sizeof(float);
-        pipe.InitBuffer(accumQueue, BUFFER_NUM, alignedBufferSize);
+
+        colIndGm.SetGlobalBuffer((__gm__ uint32_t *)col_ind, nnz);
+        // 固定UB开销，计算剩余UB空间
+        uint32_t rowBytes = numDenseCols * sizeof(float);
+        uint32_t accumBytes = ACCUM_BUFFER_NUM * rowBytes;
+        uint32_t fixedCost = rowBytes + accumBytes + rowPtrBytes;
+        uint32_t remainingUb = UB_AVAILABLE > fixedCost ? (UB_AVAILABLE - fixedCost) : 0;
+
+        uint32_t itemCost = BUFFER_NUM * rowBytes + 2 * sizeof(uint32_t);
+        uint32_t paddingCost = 4 * FLOATS_PER_ALIGN * sizeof(uint32_t);
+        uint32_t usableUb = remainingUb > paddingCost ? (remainingUb - paddingCost) : 0;
+        this->batchSize = usableUb / itemCost;
+        if (this->batchSize == 0) this->batchSize = 1;
+
+        uint32_t batchBufferSize = this->batchSize * rowBytes;
+        uint32_t sparseBatchBytes = (this->batchSize + 2 * FLOATS_PER_ALIGN) * sizeof(float);
+        // if(blockIdx == 0){
+        //     AscendC::printf("batchSize:%d\n",this->batchSize);
+        // }
+        pipe.InitBuffer(accumQueue, ACCUM_BUFFER_NUM, rowBytes);
         pipe.InitBuffer(tempQueue, BUFFER_NUM, batchBufferSize);
+        pipe.InitBuffer(colIndQue, BUFFER_NUM, sparseBatchBytes);
+        pipe.InitBuffer(rowPtrBuf, rowPtrBytes);
     }
     
     // Process SpMM computation for assigned rows
     __aicore__ inline void Process()
     {
-        for(uint32_t rowIdx = this->startRow; rowIdx < this->endRow; rowIdx++)
+        if (this->endRow <= this->startRow) return;
+        AscendC::LocalTensor<uint32_t> localRowPtr = rowPtrBuf.Get<uint32_t>();
+        AscendC::DataCopy(localRowPtr, rowPtrGm[this->alignedStartRow], this->rowPtrAlignedElements);
+        for(uint32_t rowIdx = this->startRow; rowIdx < this->endRow; ++rowIdx)
         {
-            uint32_t rowStart = rowPtrGm.GetValue(rowIdx);
-            uint32_t rowEnd = rowPtrGm.GetValue(rowIdx + 1);
+            AscendC::LocalTensor<float> accumBlock = accumQueue.AllocTensor<float>();
+            AscendC::Duplicate<float>(accumBlock, float(0.0f), numDenseCols);
+
+            uint32_t localIdx = rowIdx - this->startRow + this->rowPtrOffset;
+            uint32_t rowStart = localRowPtr.GetValue(localIdx);
+            uint32_t rowEnd = localRowPtr.GetValue(localIdx + 1);
             uint32_t rowNnz = rowEnd - rowStart;
-            
-            if (rowNnz == 0) {
-                // Handle empty row - output zeros
-                AscendC::LocalTensor<float> accum = accumQueue.AllocTensor<float>();
-                AscendC::Duplicate<float>(accum, float(0.0f), alignedDenseCols);
-                accumQueue.EnQue<float>(accum);
-                CopyOut(rowIdx);
-                continue;
-            }
-            
-            AscendC::LocalTensor<float> accum = accumQueue.AllocTensor<float>();
-            AscendC::Duplicate<float>(accum, float(0.0f), alignedDenseCols);
-            
-            uint32_t batchCount = (rowNnz + batchSize - 1) / batchSize;
-            if (batchCount == 1) {
-                CopyIn(rowStart, rowStart + rowNnz);
-                Compute(accum, rowNnz);
-            } else {
-                uint32_t firstBatchEnd = rowStart + batchSize;
-                CopyIn(rowStart, firstBatchEnd);
-                for (uint32_t batchIdx = 1; batchIdx < batchCount; ++batchIdx) {
+            if (rowNnz > 0) 
+            {
+                uint32_t batchCount = (rowNnz + batchSize - 1) / batchSize;
+                for (uint32_t batchIdx = 0; batchIdx < batchCount; ++batchIdx) {
                     uint32_t batchStart = rowStart + batchIdx * batchSize;
-                    uint32_t batchEnd = batchStart + batchSize > rowStart + rowNnz ? rowStart + rowNnz : batchStart + batchSize;
-                    CopyIn(batchStart, batchEnd);
-                    Compute(accum, batchSize);
+                    uint32_t curBatchNnz = (batchStart + batchSize > rowStart + rowNnz) ? (rowStart + rowNnz - batchStart) : batchSize;
+                    
+                    uint32_t alignedBatchStart = (batchStart / FLOATS_PER_ALIGN) * FLOATS_PER_ALIGN;
+                    uint32_t alignedBatchEnd = ((batchStart + curBatchNnz + FLOATS_PER_ALIGN - 1) / FLOATS_PER_ALIGN) * FLOATS_PER_ALIGN;
+                    uint32_t alignedBatchTotal = alignedBatchEnd - alignedBatchStart;
+                    uint32_t localOffset = batchStart - alignedBatchStart;
+
+                    AscendC::LocalTensor<uint32_t> localColInd = colIndQue.AllocTensor<uint32_t>();
+                    AscendC::DataCopy(localColInd, colIndGm[alignedBatchStart], alignedBatchTotal);
+                    colIndQue.EnQue(localColInd);
+                    AscendC::LocalTensor<uint32_t> readyColInd = colIndQue.DeQue<uint32_t>();
+                    
+                    CopyIn(curBatchNnz, localOffset, readyColInd);
+                    Compute(accumBlock, curBatchNnz);
+                    colIndQue.FreeTensor(readyColInd);
                 }
-                
-                uint32_t lastBatchNnz = (rowNnz % batchSize == 0) ? batchSize : (rowNnz % batchSize);
-                Compute(accum, lastBatchNnz);
             }
-            
-            accumQueue.EnQue<float>(accum);
-            CopyOut(rowIdx);
+            accumQueue.EnQue<float>(accumBlock);
+            CopyOut(rowIdx); 
         }
     }
 
 private:
-    // Copy dense matrix rows to local buffer
-    __aicore__ inline void CopyIn(uint32_t batchStart, uint32_t batchEnd){
-        uint32_t batchNnz = batchEnd - batchStart;
-        
+    __aicore__ inline void CopyIn(uint32_t batchNnz, uint32_t localOffset, AscendC::LocalTensor<uint32_t>& readyColInd) {
         AscendC::LocalTensor<float> tempFeaturesBatch = tempQueue.AllocTensor<float>();
-        AscendC::Duplicate<float>(tempFeaturesBatch, float(0.0f), batchNnz * alignedDenseCols);
         
         for (uint32_t i = 0; i < batchNnz; ++i) {
-            uint32_t idx = batchStart + i;
-            uint32_t col = colIndGm.GetValue(idx);
-            uint32_t offset = i * alignedDenseCols;
-            AscendC::DataCopy(tempFeaturesBatch[offset], denseGm[col * numDenseCols], alignedPart);
-        }
-        for (uint32_t i = 0; i < batchNnz; ++i) {
-            uint32_t idx = batchStart + i;
-            uint32_t col = colIndGm.GetValue(idx);
-            uint32_t offset = i * alignedDenseCols;
-            for (uint32_t j = 0; j < remainder; ++j) {
-                uint32_t colIdx = alignedPart + j;
-                float val = denseGm.GetValue(col * numDenseCols + colIdx);
-                tempFeaturesBatch.SetValue(offset + colIdx, val);
-            }
+            uint32_t col = readyColInd.GetValue(localOffset + i); 
+            uint32_t offset = i * numDenseCols;
+            AscendC::DataCopy(tempFeaturesBatch[offset], denseGm[col * numDenseCols], numDenseCols);
         }
         
         tempQueue.EnQue<float>(tempFeaturesBatch);
     }
 
-    // Accumulate feature vectors using sum reduction
-    __aicore__ inline void Compute(AscendC::LocalTensor<float>& accum, uint32_t batchNnz){
+    __aicore__ inline void Compute(AscendC::LocalTensor<float>& accumBlock, uint32_t batchNnz)
+    {
         AscendC::LocalTensor<float> tempFeaturesBatch = tempQueue.DeQue<float>();
 
         for (uint32_t i = 0; i < batchNnz; ++i) {
-            uint32_t offset = i * alignedDenseCols;
-            AscendC::Add(accum, accum, tempFeaturesBatch[offset], alignedDenseCols);
+            uint32_t offset = i * numDenseCols;
+            AscendC::Add(accumBlock, accumBlock, tempFeaturesBatch[offset], numDenseCols);
         }
-        
+
         tempQueue.FreeTensor(tempFeaturesBatch);
     }
 
-    // Copy accumulated result to global memory
-    __aicore__ inline void CopyOut(int32_t rowIdx){
-        AscendC::LocalTensor<float> accum = accumQueue.DeQue<float>();
-        AscendC::DataCopy(outputGm[rowIdx * numDenseCols], accum, alignedPart);
-        
-        for (uint32_t j = 0; j < remainder; ++j) {
-            uint32_t idx = alignedPart + j;
-            float val = accum.GetValue(idx);
-            outputGm.SetValue(rowIdx * numDenseCols + idx, val);
-        }
-        accumQueue.FreeTensor(accum);
+    __aicore__ inline void CopyOut(uint32_t rowIdx){
+        AscendC::LocalTensor<float> accumBlock = accumQueue.DeQue<float>();
+        AscendC::DataCopy(outputGm[rowIdx * numDenseCols], accumBlock, numDenseCols);
+        accumQueue.FreeTensor(accumBlock);
     }
 
 private:
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> accumQueue;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> tempQueue; 
+    AscendC::TQue<AscendC::TPosition::VECOUT, ACCUM_BUFFER_NUM> accumQueue;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> tempQueue;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> colIndQue;
+    AscendC::TBuf<AscendC::TPosition::VECIN> rowPtrBuf;
     
     AscendC::GlobalTensor<uint32_t> rowPtrGm;
     AscendC::GlobalTensor<uint32_t> colIndGm;
@@ -166,17 +172,16 @@ private:
     uint32_t numSparseRows;
     uint32_t numSparseCols; 
     uint32_t numDenseCols;
-    uint32_t alignedDenseCols; 
     uint32_t nnz;
     uint32_t batchSize;
-    uint32_t alignedPart;      // Pre-computed aligned part
-    uint32_t remainder;        // Pre-computed remainder
-    bool useAlignedCopy;       // Whether to use aligned copy optimization
-    uint32_t startRow, endRow; // Row range assigned to this block
+    uint32_t startRow, endRow;
+    uint32_t alignedStartRow;
+    uint32_t rowPtrOffset;
+    uint32_t rowPtrAlignedElements;
 };
 
 // Kernel entry point for SpMM sum operation
-extern "C" __global__ __aicore__ void spmm_sum(GM_ADDR row_ptr, GM_ADDR col_ind, 
+extern "C" __global__ __aicore__ void spmm_sum(GM_ADDR row_ptr, GM_ADDR col_ind,
                                                     GM_ADDR dense_matrix,
                                                     GM_ADDR output, GM_ADDR tiling_ptr)
 {
@@ -188,6 +193,7 @@ extern "C" __global__ __aicore__ void spmm_sum(GM_ADDR row_ptr, GM_ADDR col_ind,
     uint32_t numSparseCols = tilingGm.GetValue(1);
     uint32_t numDenseCols = tilingGm.GetValue(2);
     uint32_t nnz = tilingGm.GetValue(3);
+    
     KernelSpmmSum op;
     op.Init(row_ptr, col_ind, dense_matrix, output,
             numSparseRows, numSparseCols, numDenseCols,

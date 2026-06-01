@@ -315,23 +315,7 @@ void SpMMCsrAscend(
       }
     }
 
-    if (cache_hit) {
-      LOG(INFO) << "[Ascend][SpMM][Cache] hit reduce=" << reduce
-                << " device=" << ctx.device_id
-                << " rows=" << num_rows_u32
-                << " cols=" << num_cols_u32
-                << " edges=" << num_edges_u32
-                << " out_dim=" << out_dim_u32;
-    }
-
     if (!cache_value) {
-      LOG(INFO) << "[Ascend][SpMM][Cache] miss reduce=" << reduce
-                << " device=" << ctx.device_id
-                << " rows=" << num_rows_u32
-                << " cols=" << num_cols_u32
-                << " edges=" << num_edges_u32
-                << " out_dim=" << out_dim_u32
-                << ", building max/min preprocess cache";
       std::vector<uint32_t> row_pointers =
           CopyDeviceArrayToHostUInt32(indptr_ptr, static_cast<size_t>(num_rows + 1), stream);
       std::vector<uint32_t> vector_core_row_split =

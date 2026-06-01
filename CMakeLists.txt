@@ -237,7 +237,6 @@ if(USE_ASCEND)
           get_filename_component(kernel_name ${kernel_file} NAME)
           message(STATUS "  - ${kernel_name}")
         endforeach()
-<<<<<<< HEAD
 
         message(STATUS "Building AscendC kernel libraries as separate static libraries")
         foreach(kernel_file ${ASCENDC_KERNEL_FILES})
@@ -248,13 +247,6 @@ if(USE_ASCEND)
           ascendc_library(${kernel_target} STATIC ${kernel_file})
           list(APPEND DGL_LINKER_LIBS ${kernel_target})
         endforeach()
-=======
-        
-        message(STATUS "Building AscendC kernel library (dgl_ascendc_kernels) as static library")
-        # Build as static library to directly integrate into dgl
-        ascendc_library(dgl_ascendc_kernels STATIC ${ASCENDC_KERNEL_FILES})
-        list(APPEND DGL_LINKER_LIBS dgl_ascendc_kernels)
->>>>>>> 931b311cb3017584bebbda61b5720b9d2aaad059
       else()
         message(STATUS "No AscendC kernel files found (looking for *_kernel.cpp in src/array/ascend/)")
       endif()

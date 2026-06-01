@@ -305,13 +305,11 @@ void SpMMCsrAscend(
 
   if (reduce == "max" || reduce == "min") {
     std::shared_ptr<MaxMinPreprocessCacheValue> cache_value;
-    bool cache_hit = false;
     {
       std::lock_guard<std::mutex> lock(g_spmm_preprocess_cache_mutex);
       auto it = g_maxmin_preprocess_cache.find(cache_key);
       if (it != g_maxmin_preprocess_cache.end()) {
         cache_value = it->second;
-        cache_hit = true;
       }
     }
 
@@ -382,33 +380,15 @@ void SpMMCsrAscend(
   }
 
   std::shared_ptr<SumPreprocessCacheValue> cache_value;
-  bool cache_hit = false;
   {
     std::lock_guard<std::mutex> lock(g_spmm_preprocess_cache_mutex);
     auto it = g_sum_preprocess_cache.find(cache_key);
     if (it != g_sum_preprocess_cache.end()) {
       cache_value = it->second;
-      cache_hit = true;
     }
   }
 
-  if (cache_hit) {
-    LOG(INFO) << "[Ascend][SpMM][Cache] hit reduce=" << reduce
-              << " device=" << ctx.device_id
-              << " rows=" << num_rows_u32
-              << " cols=" << num_cols_u32
-              << " edges=" << num_edges_u32
-              << " out_dim=" << out_dim_u32;
-  }
-
   if (!cache_value) {
-    LOG(INFO) << "[Ascend][SpMM][Cache] miss reduce=" << reduce
-              << " device=" << ctx.device_id
-              << " rows=" << num_rows_u32
-              << " cols=" << num_cols_u32
-              << " edges=" << num_edges_u32
-              << " out_dim=" << out_dim_u32
-              << ", building sum preprocess cache";
     std::vector<uint32_t> row_pointers =
         CopyDeviceArrayToHostUInt32(indptr_ptr, static_cast<size_t>(num_rows + 1), stream);
     std::vector<uint32_t> column_indices =

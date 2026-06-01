@@ -29,9 +29,6 @@ struct SegmentReduceTilingData {
 extern "C" uint32_t aclrtlaunch_segment_reduce_sum(
     uint32_t blockDim, aclrtStream stream, void* offsets, void* feat,
     void* output, void* segment_split, void* tiling);
-extern "C" uint32_t aclrtlaunch_segment_reduce_mean(
-    uint32_t blockDim, aclrtStream stream, void* offsets, void* feat,
-    void* output, void* segment_split, void* tiling);
 extern "C" uint32_t aclrtlaunch_segment_reduce_max(
     uint32_t blockDim, aclrtStream stream, void* offsets, void* feat,
     void* output, void* segment_split, void* tiling);
@@ -128,7 +125,7 @@ void SegmentReduceAscend(
   DGLContext ctx = feat->ctx;
   ASCEND_CALL(aclrtSetDevice(ctx.device_id));
 
-  if (op == "sum" || op == "mean" || op == "max" || op == "min") {
+  if (op == "sum" || op == "max" || op == "min") {
     int64_t num_items = feat->shape[0];
     int64_t num_segments = out->shape[0];
     int64_t feat_dim = 1;
@@ -150,10 +147,6 @@ void SegmentReduceAscend(
       LaunchSegmentReduceKernel(
           aclrtlaunch_segment_reduce_sum, ctx.device_id, num_items,
           num_segments, feat_dim, offsets_ptr, feat_ptr, out_ptr, stream);
-    } else if (op == "mean") {
-      LaunchSegmentReduceKernel(
-          aclrtlaunch_segment_reduce_mean, ctx.device_id, num_items,
-          num_segments, feat_dim, offsets_ptr, feat_ptr, out_ptr, stream);
     } else if (op == "max") {
       LaunchSegmentReduceKernel(
           aclrtlaunch_segment_reduce_max, ctx.device_id, num_items,
@@ -170,6 +163,22 @@ void SegmentReduceAscend(
   LOG(FATAL)
       << "Ascend support is not compiled. Please compile with -DUSE_ASCEND=ON";
 #endif
+}
+
+template <>
+void SegmentReduce<kDGLAscend, int32_t, uint16_t>(
+    const std::string& op, NDArray feat, NDArray offsets, NDArray out,
+    NDArray arg) {
+  LOG(FATAL)
+      << "Current Ascend segment_reduce kernel only supports float features.";
+}
+
+template <>
+void SegmentReduce<kDGLAscend, int64_t, uint16_t>(
+    const std::string& op, NDArray feat, NDArray offsets, NDArray out,
+    NDArray arg) {
+  LOG(FATAL)
+      << "Current Ascend segment_reduce kernel only supports float features.";
 }
 
 template <>

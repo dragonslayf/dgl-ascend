@@ -29,8 +29,8 @@ class LightGCN(nn.Module):
         nn.init.normal_(self.embedding_item.weight, mean=0.0, std=0.1)
 
     def forward(self, g):
-        h_user = self.embedding_user.weight
-        h_item = self.embedding_item.weight
+        h_user = self.embedding_user.weight.to(g.device)
+        h_item = self.embedding_item.weight.to(g.device)
         # Store embeddings from all layers
         embeddingList_user = [h_user]
         embeddingList_item = [h_item]
@@ -61,4 +61,4 @@ class LightGCN(nn.Module):
         reg_loss = (1/2)*(userEmb0.norm(2).pow(2) + 
                          posEmb0.norm(2).pow(2)  +
                          negEmb0.norm(2).pow(2))/float(len(batch_user))
-        return loss.cpu(), reg_loss.cpu()
+        return loss, reg_loss

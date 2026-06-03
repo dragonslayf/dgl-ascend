@@ -82,15 +82,6 @@ def sample_triplets(hetero_g, allPos, allPos_sets, n, etype=('user', 'interacts'
             if negitem not in pos_set:
                 break
         
-        # If still not found (unlikely), use first non-positive item
-        if negitem is None or negitem in pos_set:
-            # Fallback: find any item not in positive set
-            all_items = set(range(num_items))
-            negative_candidates = list(all_items - pos_set)
-            if len(negative_candidates) > 0:
-                negitem = np.random.choice(negative_candidates)
-            else:
-                continue  # Skip if user has all items as positive
         
         users_list.append(user)
         pos_items_list.append(positem)
@@ -100,7 +91,8 @@ def sample_triplets(hetero_g, allPos, allPos_sets, n, etype=('user', 'interacts'
     users = torch.tensor(users_list, dtype=torch.long, device=device)
     pos_items = torch.tensor(pos_items_list, dtype=torch.long, device=device)
     neg_items = torch.tensor(neg_items_list, dtype=torch.long, device=device)
-    
+    time_end = time.time()
+    print("sample time cost:", time_end - time_start)
     return users, pos_items, neg_items
 
 def shuffle(*arrays, **kwargs):

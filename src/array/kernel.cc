@@ -24,7 +24,7 @@ void SpMM(
   SparseFormat format = graph->SelectFormat(0, CSC_CODE);
   const auto& bcast = CalcBcastOff(op, ufeat, efeat);
 
-  ATEN_XPU_SWITCH_CUDA(graph->Context().device_type, XPU, "SpMM", {
+  ATEN_XPU_SWITCH_CUDA_ASCEND(graph->Context().device_type, XPU, "SpMM", {
     ATEN_ID_TYPE_SWITCH(graph->DataType(), IdType, {
       ATEN_FLOAT_TYPE_SWITCH_16BITS(out->dtype, Dtype, XPU, "Feature data", {
         if (format == SparseFormat::kCSC) {
@@ -355,7 +355,7 @@ NDArray GetEdgeMapping(HeteroGraphRef graph) {
 void SegmentReduceDispatch(
     const std::string& op, NDArray feat, NDArray offsets, NDArray out,
     NDArray arg) {
-  ATEN_XPU_SWITCH_CUDA(feat->ctx.device_type, XPU, "SegmentReduce", {
+  ATEN_XPU_SWITCH_CUDA_ASCEND(feat->ctx.device_type, XPU, "SegmentReduce", {
     ATEN_ID_TYPE_SWITCH(offsets->dtype, IdType, {
       ATEN_FLOAT_TYPE_SWITCH_16BITS(feat->dtype, Dtype, XPU, "Feature data", {
         SegmentReduce<XPU, IdType, Dtype>(op, feat, offsets, out, arg);

@@ -716,6 +716,8 @@ inline const char* DeviceTypeCode2Str(DGLDeviceType device_type) {
       return "cpu";
     case kDGLCUDA:
       return "cuda";
+    case kDGLNPU:
+      return "npu";
     default:
       LOG(FATAL) << "Unsupported device type code="
                  << static_cast<int>(device_type);

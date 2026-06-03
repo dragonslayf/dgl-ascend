@@ -32,6 +32,8 @@ inline std::string DeviceName(int type) {
       return "cpu";
     case kDGLCUDA:
       return "cuda";
+    case kDGLNPU:
+      return "npu";
     // add more device here once supported
     default:
       LOG(FATAL) << "unknown type =" << type;

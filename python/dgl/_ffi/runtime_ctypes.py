@@ -117,6 +117,7 @@ class DGLContext(ctypes.Structure):
     MASK2STR = {
         1: "cpu",
         2: "gpu",
+        3: "npu",
         4: "opencl",
         5: "aocl",
         6: "sdaccel",
@@ -133,6 +134,7 @@ class DGLContext(ctypes.Structure):
         "cpu": 1,
         "gpu": 2,
         "cuda": 2,
+        "npu": 3,
         "nvptx": 2,
         "cl": 4,
         "opencl": 4,

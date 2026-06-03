@@ -28,6 +28,41 @@
     }                                                                    \
   } while (0)
 
+#ifdef DGL_USE_ASCEND
+#define ATEN_XPU_SWITCH_CPU_NPU(val, XPU, op, ...)                       \
+  do {                                                                   \
+    if ((val) == kDGLCPU) {                                              \
+      constexpr auto XPU = kDGLCPU;                                      \
+      { __VA_ARGS__ }                                                    \
+    } else if ((val) == kDGLNPU) {                                       \
+      constexpr auto XPU = kDGLNPU;                                      \
+      { __VA_ARGS__ }                                                    \
+    } else {                                                             \
+      LOG(FATAL) << "Operator " << (op) << " does not support "          \
+                 << dgl::runtime::DeviceTypeCode2Str(val) << " device."; \
+    }                                                                    \
+  } while (0)
+#else
+#define ATEN_XPU_SWITCH_CPU_NPU ATEN_XPU_SWITCH
+#endif  // DGL_USE_ASCEND
+
+#ifdef DGL_USE_CUDA
+#undef ATEN_XPU_SWITCH
+#define ATEN_XPU_SWITCH(val, XPU, op, ...)                             \
+  do {                                                                 \
+    if ((val) == kDGLCPU) {                                            \
+      constexpr auto XPU = kDGLCPU;                                    \
+      { __VA_ARGS__ }                                                  \
+    } else if ((val) == kDGLCUDA) {                                    \
+      constexpr auto XPU = kDGLCUDA;                                   \
+      { __VA_ARGS__ }                                                  \
+    } else {                                                           \
+      LOG(FATAL) << "Operator " << (op) << " does not support "        \
+                 << dgl::runtime::DeviceTypeCode2Str(val) << " device."; \
+    }                                                                  \
+  } while (0)
+#endif  // DGL_USE_CUDA
+
 /**
  * Dispatch according to device:
  *
@@ -56,7 +91,16 @@
     }                                                                    \
   } while (0)
 #else  // DGL_USE_CUDA
-#define ATEN_XPU_SWITCH_CUDA ATEN_XPU_SWITCH
+#define ATEN_XPU_SWITCH_CUDA(val, XPU, op, ...)                          \
+  do {                                                                   \
+    if ((val) == kDGLCPU) {                                              \
+      constexpr auto XPU = kDGLCPU;                                      \
+      { __VA_ARGS__ }                                                    \
+    } else {                                                             \
+      LOG(FATAL) << "Operator " << (op) << " does not support "          \
+                 << dgl::runtime::DeviceTypeCode2Str(val) << " device."; \
+    }                                                                    \
+  } while (0)
 #endif  // DGL_USE_CUDA
 
 /**
@@ -373,8 +417,14 @@
     ATEN_ID_TYPE_SWITCH((coo).row->dtype, IdType, {{__VA_ARGS__}}); \
   });
 #else  // DGL_USE_CUDA
-#define ATEN_CSR_SWITCH_CUDA ATEN_CSR_SWITCH
-#define ATEN_COO_SWITCH_CUDA ATEN_COO_SWITCH
+#define ATEN_CSR_SWITCH_CUDA(csr, XPU, IdType, op, ...)                \
+  ATEN_XPU_SWITCH_CUDA((csr).indptr->ctx.device_type, XPU, op, {       \
+    ATEN_ID_TYPE_SWITCH((csr).indptr->dtype, IdType, {{__VA_ARGS__}}); \
+  });
+#define ATEN_COO_SWITCH_CUDA(coo, XPU, IdType, op, ...)             \
+  ATEN_XPU_SWITCH_CUDA((coo).row->ctx.device_type, XPU, op, {       \
+    ATEN_ID_TYPE_SWITCH((coo).row->dtype, IdType, {{__VA_ARGS__}}); \
+  });
 #endif  // DGL_USE_CUDA
 
 ///////////////////////// Array checks //////////////////////////

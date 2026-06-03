@@ -20,6 +20,7 @@ dgl_option(BUILD_TYPE "Type of the build: dev, dogfood or release" "dev")
 message(STATUS "Build for ${BUILD_TYPE}")
 
 dgl_option(USE_CUDA "Build with CUDA" OFF)
+dgl_option(USE_ASCEND "Build with Huawei Ascend NPU" OFF)
 dgl_option(TORCH_PYTHON_INTERPS "Python interpreter for building sub-components" python3)
 
 # Conda build related options.
@@ -146,6 +147,34 @@ if(USE_CUDA)
   cuda_include_directories(BEFORE "${CMAKE_SOURCE_DIR}/third_party/cccl/libcudacxx/include")
 endif(USE_CUDA)
 
+if(USE_ASCEND)
+  message(STATUS "Build with Ascend NPU support")
+  add_definitions(-DDGL_USE_ASCEND)
+  dgl_option(ASCEND_PATH "Path to Ascend CANN toolkit root" "")
+  if(ASCEND_PATH)
+    # use explicit cmake option
+  elseif(DEFINED ENV{DDK_PATH})
+    set(ASCEND_PATH "$ENV{DDK_PATH}")
+  elseif(EXISTS "/usr/local/Ascend/ascend-toolkit/latest")
+    set(ASCEND_PATH "/usr/local/Ascend/ascend-toolkit/latest")
+  else()
+    message(FATAL_ERROR "USE_ASCEND=ON requires ASCEND_PATH or DDK_PATH")
+  endif()
+  set(ASCEND_CUST_OPAPI "${ASCEND_PATH}/opp/vendors/customize/op_api")
+  if(NOT EXISTS "${ASCEND_CUST_OPAPI}/include/aclnn_random_walk_custom.h")
+    message(FATAL_ERROR
+      "RandomWalkCustom op API not found under ${ASCEND_CUST_OPAPI}. "
+      "Build/deploy the custom op first.")
+  endif()
+  message(STATUS "Ascend toolkit: ${ASCEND_PATH}")
+  if(NOT DEFINED ENV{NPU_HOST_LIB})
+    string(TOLOWER "${CMAKE_SYSTEM_NAME}" SYSTEM_NAME_LOWER)
+    set(ASCEND_LIB_PATH "${ASCEND_PATH}/${CMAKE_SYSTEM_PROCESSOR}-${SYSTEM_NAME_LOWER}/lib64")
+  else()
+    set(ASCEND_LIB_PATH "$ENV{NPU_HOST_LIB}")
+  endif()
+endif(USE_ASCEND)
+
 # initial variables
 if(NOT MSVC)
 set(DGL_LINKER_LIBS "dl")
@@ -218,6 +247,13 @@ else()
 endif()
 list(APPEND DGL_SRC ${DGL_RPC_SRC})
 
+if(USE_ASCEND)
+  list(APPEND DGL_SRC
+    src/graph/sampling/randomwalks/randomwalk_npu.cc
+    src/runtime/npu_device_api.cc
+  )
+endif(USE_ASCEND)
+
 if(USE_OPENMP)
   find_package(OpenMP REQUIRED)
   list(APPEND DGL_LINKER_LIBS OpenMP::OpenMP_CXX)
@@ -259,6 +295,12 @@ endif ()
 
 # include directories
 target_include_directories(dgl PRIVATE "include")
+if(USE_ASCEND)
+  target_include_directories(
+    dgl PRIVATE ${ASCEND_PATH}/include ${ASCEND_CUST_OPAPI}/include)
+  target_link_directories(dgl PRIVATE ${ASCEND_LIB_PATH} ${ASCEND_CUST_OPAPI}/lib)
+  list(APPEND DGL_LINKER_LIBS ascendcl cust_opapi acl_op_compiler nnopbase)
+endif(USE_ASCEND)
 # check for conda includes
 if("$ENV{CONDA_BUILD}" STREQUAL "1")
   set(in_conda_build TRUE)

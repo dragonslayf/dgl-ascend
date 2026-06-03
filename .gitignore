@@ -143,6 +143,14 @@ examples/pytorch/generative_graph/*.p
 # data directory
 _download
 
+# Example datasets and generated artifacts
+examples/pytorch/lightgcn/gowalla.zip
+examples/pytorch/lightgcn/gowalla/
+examples/pytorch/lightgcn/load_yelp2018.sh
+examples/pytorch/ogb/deepwalk/*.txt
+examples/pytorch/ogb/deepwalk/*.txt.npy
+examples/pytorch/ogb/deepwalk/*.pickle
+
 # CTags & CScope
 tags
 cscope.*

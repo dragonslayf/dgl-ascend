@@ -107,7 +107,13 @@ def device_type(ctx):
 def device_id(ctx):
     ctx = th.device(ctx)
     if ctx.index is None:
-        return 0 if ctx.type == "cpu" else th.cuda.current_device()
+        if ctx.type == "cpu":
+            return 0
+        if ctx.type == "cuda":
+            return th.cuda.current_device()
+        if ctx.type == "npu" and hasattr(th, "npu"):
+            return th.npu.current_device()
+        return 0
     else:
         return ctx.index
 
@@ -118,6 +124,8 @@ def to_backend_ctx(dglctx):
         return th.device("cpu")
     elif dev_type == 2:
         return th.device("cuda", dglctx.device_id)
+    elif dev_type == 3:
+        return th.device("npu", dglctx.device_id)
     else:
         raise ValueError("Unsupported DGL device context:", dglctx)
 
@@ -141,6 +149,12 @@ def copy_to(input, ctx, **kwargs):
         if ctx.index is not None:
             th.cuda.set_device(ctx.index)
         return input.cuda(**kwargs)
+    elif ctx.type == "npu":
+        if hasattr(th, "npu"):
+            if ctx.index is not None:
+                th.npu.set_device(ctx.index)
+            return input.to(ctx, **kwargs)
+        raise RuntimeError("torch.npu is not available")
     else:
         raise RuntimeError("Invalid context", ctx)
 

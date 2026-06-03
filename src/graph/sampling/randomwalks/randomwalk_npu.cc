@@ -100,7 +100,7 @@ void CopyToHost(const void* src, DGLContext src_ctx, T* dst, size_t count) {
     std::memcpy(dst, src, bytes);
     return;
   }
-  NPU_CHECK(src_ctx.device_type == kDGLNPU, "expected NPU tensor context");
+  NPU_CHECK(src_ctx.device_type == kDGLAscend, "expected Ascend tensor context");
   ACL_CHECK(aclrtSetDevice(src_ctx.device_id));
   ACL_CHECK(aclrtMemcpy(dst, bytes, src, bytes, ACL_MEMCPY_DEVICE_TO_HOST));
 }
@@ -112,7 +112,7 @@ void CopyToDevice(void* dst, DGLContext dst_ctx, const T* src, size_t count) {
     std::memcpy(dst, src, bytes);
     return;
   }
-  NPU_CHECK(dst_ctx.device_type == kDGLNPU, "expected NPU tensor context");
+  NPU_CHECK(dst_ctx.device_type == kDGLAscend, "expected Ascend tensor context");
   ACL_CHECK(aclrtSetDevice(dst_ctx.device_id));
   ACL_CHECK(aclrtMemcpy(dst, bytes, src, bytes, ACL_MEMCPY_HOST_TO_DEVICE));
 }
@@ -179,8 +179,8 @@ std::pair<IdArray, IdArray> RandomWalkUniformNPU(
     FloatArray restart_prob) {
   CHECK(restart_prob->shape[0] == 0)
       << "NPU random walk does not support restart probability yet.";
-  CHECK_EQ(seeds->ctx.device_type, kDGLNPU)
-      << "seeds must be on NPU for Ascend random walk.";
+  CHECK_EQ(seeds->ctx.device_type, kDGLAscend)
+      << "seeds must be on Ascend for Ascend random walk.";
   CHECK_EQ(metapath->ctx.device_type, kDGLCPU)
       << "metapath is expected on CPU.";
 
@@ -344,7 +344,7 @@ std::pair<IdArray, IdArray> RandomWalk(
   CHECK(is_uniform) << "NPU random walk only supports uniform transition.";
 
   auto restart_prob =
-      NDArray::Empty({0}, DGLDataType{kDGLFloat, 32, 1}, DGLContext{kDGLNPU, 0});
+      NDArray::Empty({0}, DGLDataType{kDGLFloat, 32, 1}, DGLContext{kDGLAscend, 0});
   return RandomWalkUniformNPU<IdType>(hg, seeds, metapath, restart_prob);
 }
 
@@ -373,20 +373,20 @@ std::tuple<IdArray, IdArray, IdArray> SelectPinSageNeighbors(
 }
 
 #define INSTANTIATE_NPU_RANDOMWALK(IdType)                                         \
-  template TypeArray GetNodeTypesFromMetapath<kDGLNPU, IdType>(                    \
+  template TypeArray GetNodeTypesFromMetapath<kDGLAscend, IdType>(                    \
       const HeteroGraphPtr hg, const TypeArray metapath);                            \
-  template std::pair<IdArray, IdArray> RandomWalk<kDGLNPU, IdType>(                 \
+  template std::pair<IdArray, IdArray> RandomWalk<kDGLAscend, IdType>(                 \
       const HeteroGraphPtr hg, const IdArray seeds, const TypeArray metapath,        \
       const std::vector<FloatArray>& prob);                                          \
-  template std::pair<IdArray, IdArray> RandomWalkWithRestart<kDGLNPU, IdType>(     \
+  template std::pair<IdArray, IdArray> RandomWalkWithRestart<kDGLAscend, IdType>(     \
       const HeteroGraphPtr hg, const IdArray seeds, const TypeArray metapath,        \
       const std::vector<FloatArray>& prob, double restart_prob);                   \
   template std::pair<IdArray, IdArray>                                             \
-  RandomWalkWithStepwiseRestart<kDGLNPU, IdType>(                                  \
+  RandomWalkWithStepwiseRestart<kDGLAscend, IdType>(                                  \
       const HeteroGraphPtr hg, const IdArray seeds, const TypeArray metapath,        \
       const std::vector<FloatArray>& prob, FloatArray restart_prob);                 \
   template std::tuple<IdArray, IdArray, IdArray>                                     \
-  SelectPinSageNeighbors<kDGLNPU, IdType>(                                         \
+  SelectPinSageNeighbors<kDGLAscend, IdType>(                                         \
       const IdArray src, const IdArray dst, const int64_t num_samples_per_node,     \
       const int64_t k)
 

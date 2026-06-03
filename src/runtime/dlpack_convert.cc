@@ -28,8 +28,8 @@ inline DGLContext ToDGLContext(const DLDevice& device) {
   DGLContext ctx;
   // PyTorch Ascend tensors are usually exported as kDLExtDev (PrivateUse1).
   if (device.device_type == kDLExtDev ||
-      device.device_type == static_cast<DLDeviceType>(kDGLNPU)) {
-    ctx.device_type = kDGLNPU;
+      device.device_type == static_cast<DLDeviceType>(kDGLAscend)) {
+    ctx.device_type = kDGLAscend;
   } else {
     ctx.device_type = static_cast<DGLDeviceType>(device.device_type);
   }
@@ -47,7 +47,7 @@ inline DGLDataType ToDGLDataType(const DLDataType& src) {
 
 inline DLDevice ToDLDevice(const DGLContext& ctx) {
   DLDevice device;
-  if (ctx.device_type == kDGLNPU) {
+  if (ctx.device_type == kDGLAscend) {
     device.device_type = kDLExtDev;
   } else {
     device.device_type = static_cast<DLDeviceType>(ctx.device_type);

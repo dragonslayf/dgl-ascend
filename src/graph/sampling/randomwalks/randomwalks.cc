@@ -36,13 +36,13 @@ void CheckRandomWalkInputs(
   // CHECK_SAME_CONTEXT(seeds, metapath);
 
   if (hg->IsPinned()) {
-    CHECK(seeds->ctx.device_type == kDGLCUDA || seeds->ctx.device_type == kDGLNPU)
+    CHECK(seeds->ctx.device_type == kDGLCUDA || seeds->ctx.device_type == kDGLAscend)
         << "Expected seeds (" << seeds->ctx << ")"
         << " to be on accelerator when the graph is pinned.";
   } else if (hg->Context() != seeds->ctx) {
     // Ascend path keeps graph CSR on host and only requires seeds on NPU.
     const bool ascend_cpu_graph_npu_seeds =
-        (seeds->ctx.device_type == kDGLNPU &&
+        (seeds->ctx.device_type == kDGLAscend &&
          hg->Context().device_type == kDGLCPU);
     if (!ascend_cpu_graph_npu_seeds) {
       LOG(FATAL) << "Expected seeds (" << seeds->ctx << ")"

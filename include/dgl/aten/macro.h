@@ -34,8 +34,8 @@
     if ((val) == kDGLCPU) {                                              \
       constexpr auto XPU = kDGLCPU;                                      \
       { __VA_ARGS__ }                                                    \
-    } else if ((val) == kDGLNPU) {                                       \
-      constexpr auto XPU = kDGLNPU;                                      \
+    } else if ((val) == kDGLAscend) {                                    \
+      constexpr auto XPU = kDGLAscend;                                   \
       { __VA_ARGS__ }                                                    \
     } else {                                                             \
       LOG(FATAL) << "Operator " << (op) << " does not support "          \
@@ -106,7 +106,7 @@
 /**
  * Dispatch including Ascend support.
  */
-#if defined(DGL_USE_CUDA) && defined(DGL_USE_ASCEND)
+#if defined(DGL_USE_CUDA) && defined(DGL_USE_ASCEND_ARRAY)
 #define ATEN_XPU_SWITCH_CUDA_ASCEND(val, XPU, op, ...)                   \
   do {                                                                   \
     if ((val) == kDGLCPU) {                                              \
@@ -123,7 +123,7 @@
                  << dgl::runtime::DeviceTypeCode2Str(val) << " device."; \
     }                                                                    \
   } while (0)
-#elif defined(DGL_USE_ASCEND)
+#elif defined(DGL_USE_ASCEND_ARRAY)
 #define ATEN_XPU_SWITCH_CUDA_ASCEND(val, XPU, op, ...)                   \
   do {                                                                   \
     if ((val) == kDGLCPU) {                                              \

@@ -14,9 +14,12 @@
 #include <dgl/base_heterograph.h>
 #include <dgl/random.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <cstdint>
+#include <limits>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -32,6 +35,23 @@ namespace sampling {
 namespace impl {
 
 namespace {
+
+class ScopedTimer {
+ public:
+  explicit ScopedTimer(const char* name)
+      : name_(name), start_(std::chrono::steady_clock::now()) {}
+
+  ~ScopedTimer() {
+    const auto end = std::chrono::steady_clock::now();
+    const double ms =
+        std::chrono::duration<double, std::milli>(end - start_).count();
+    LOG(INFO) << "[RandomWalk NPU][TIME] " << name_ << ": " << ms << " ms";
+  }
+
+ private:
+  const char* name_;
+  std::chrono::steady_clock::time_point start_;
+};
 
 #define NPU_CHECK(cond, msg)                                          \
   do {                                                                \
@@ -84,6 +104,15 @@ void CreateAclTensorOnDevice(
   NPU_CHECK(*tensor != nullptr, "aclCreateTensor failed");
 }
 
+aclTensor* CreateAclTensorFromDevice(
+    void* device_addr, const std::vector<int64_t>& shape, aclDataType dtype) {
+  aclTensor* tensor = aclCreateTensor(
+      shape.data(), shape.size(), dtype, nullptr, 0, aclFormat::ACL_FORMAT_ND,
+      shape.data(), shape.size(), device_addr);
+  NPU_CHECK(tensor != nullptr, "aclCreateTensor failed");
+  return tensor;
+}
+
 void DestroyAclTensor(aclTensor* tensor, void* device_addr) {
   if (tensor != nullptr) {
     aclDestroyTensor(tensor);
@@ -123,6 +152,20 @@ std::vector<IdType> CopyIdArrayToHost(const IdArray& arr) {
   std::vector<IdType> host(static_cast<size_t>(n));
   CopyToHost(arr->data, arr->ctx, host.data(), static_cast<size_t>(n));
   return host;
+}
+
+template <typename IdType>
+std::vector<int32_t> CopyIdArrayToHostInt32(const IdArray& arr) {
+  std::vector<IdType> host = CopyIdArrayToHost<IdType>(arr);
+  std::vector<int32_t> host_i32(host.size());
+  for (size_t i = 0; i < host.size(); ++i) {
+    NPU_CHECK(
+        host[i] >= static_cast<IdType>(std::numeric_limits<int32_t>::min()) &&
+            host[i] <= static_cast<IdType>(std::numeric_limits<int32_t>::max()),
+        "NPU random walk only supports values in int32 range.");
+    host_i32[i] = static_cast<int32_t>(host[i]);
+  }
+  return host_i32;
 }
 
 template <typename IdType>
@@ -189,38 +232,59 @@ std::pair<IdArray, IdArray> RandomWalkUniformNPU(
   const int64_t trace_length = max_num_steps + 1;
   auto ctx = seeds->ctx;
 
-  CheckHomogeneousMetapathCSR<IdType>(hg, metapath);
+  {
+    ScopedTimer timer("check homogeneous metapath csr");
+    CheckHomogeneousMetapathCSR<IdType>(hg, metapath);
+  }
 
   const IdType* metapath_data = metapath.Ptr<IdType>();
   const CSRMatrix csr = GetCSRForMetapathStep<IdType>(hg, metapath_data, 0);
 
-  std::vector<IdType> row_ptr_host = CopyIdArrayToHost<IdType>(csr.indptr);
-  std::vector<IdType> col_ind_host = CopyIdArrayToHost<IdType>(csr.indices);
-  std::vector<IdType> seeds_host = CopyIdArrayToHost<IdType>(seeds);
-  std::vector<IdType> metapath_host = CopyIdArrayToHost<IdType>(metapath);
+  std::vector<int32_t> row_ptr_i32;
+  std::vector<int32_t> col_ind_i32;
+  std::vector<int32_t> metapath_i32;
+  {
+    ScopedTimer timer("copy csr indptr to host int32");
+    row_ptr_i32 = CopyIdArrayToHostInt32<IdType>(csr.indptr);
+  }
+  {
+    ScopedTimer timer("copy csr indices to host int32");
+    col_ind_i32 = CopyIdArrayToHostInt32<IdType>(csr.indices);
+  }
+  {
+    ScopedTimer timer("copy metapath to host int32");
+    metapath_i32 = CopyIdArrayToHostInt32<IdType>(metapath);
+  }
 
   std::vector<uint32_t> random_host;
-  GenerateRandomNumbers<IdType>(num_seeds, max_num_steps, &random_host);
+  {
+    ScopedTimer timer("generate random numbers");
+    GenerateRandomNumbers<IdType>(num_seeds, max_num_steps, &random_host);
+  }
 
-  std::vector<int32_t> row_ptr_i32(row_ptr_host.begin(), row_ptr_host.end());
-  std::vector<int32_t> col_ind_i32(col_ind_host.begin(), col_ind_host.end());
-  std::vector<int32_t> seeds_i32(seeds_host.begin(), seeds_host.end());
-  std::vector<int32_t> metapath_i32(metapath_host.begin(), metapath_host.end());
-  std::vector<int32_t> random_i32(random_host.begin(), random_host.end());
-  std::vector<int32_t> output_i32(
-      static_cast<size_t>(num_seeds * trace_length), 0);
-
-  ACL_CHECK(aclrtSetDevice(ctx.device_id));
+  std::vector<int32_t> random_i32;
+  {
+    ScopedTimer timer("convert random numbers to int32");
+    random_i32.assign(random_host.begin(), random_host.end());
+  }
 
   aclrtStream stream = nullptr;
-  ACL_CHECK(aclrtCreateStream(&stream));
+  {
+    ScopedTimer timer("acl set device and create stream");
+    ACL_CHECK(aclrtSetDevice(ctx.device_id));
+    ACL_CHECK(aclrtCreateStream(&stream));
+  }
+
+  DGLDataType int32_dtype = DGLDataType{kDGLInt, 32, 1};
+  IdArray traces = IdArray::Empty({num_seeds, trace_length}, int32_dtype, ctx);
+  IdArray eids = IdArray::Empty({num_seeds, max_num_steps}, int32_dtype, ctx);
+  const std::vector<int64_t> output_shape{num_seeds, trace_length};
 
   void* row_ptr_dev = nullptr;
   void* col_ind_dev = nullptr;
   void* seeds_dev = nullptr;
   void* metapath_dev = nullptr;
   void* random_dev = nullptr;
-  void* output_dev = nullptr;
   aclTensor* row_ptr_tensor = nullptr;
   aclTensor* col_ind_tensor = nullptr;
   aclTensor* seeds_tensor = nullptr;
@@ -228,73 +292,101 @@ std::pair<IdArray, IdArray> RandomWalkUniformNPU(
   aclTensor* random_tensor = nullptr;
   aclTensor* output_tensor = nullptr;
 
-  CreateAclTensorOnDevice(
-      row_ptr_i32, {static_cast<int64_t>(row_ptr_i32.size())}, &row_ptr_dev,
-      aclDataType::ACL_INT32, &row_ptr_tensor);
-  CreateAclTensorOnDevice(
-      col_ind_i32, {static_cast<int64_t>(col_ind_i32.size())}, &col_ind_dev,
-      aclDataType::ACL_INT32, &col_ind_tensor);
-  CreateAclTensorOnDevice(
-      seeds_i32, {num_seeds}, &seeds_dev, aclDataType::ACL_INT32, &seeds_tensor);
-  CreateAclTensorOnDevice(
-      metapath_i32, {max_num_steps}, &metapath_dev, aclDataType::ACL_INT32,
-      &metapath_tensor);
-  CreateAclTensorOnDevice(
-      random_i32, {num_seeds * max_num_steps}, &random_dev,
-      aclDataType::ACL_INT32, &random_tensor);
-  CreateAclTensorOnDevice(
-      output_i32, {num_seeds * trace_length}, &output_dev,
-      aclDataType::ACL_INT32, &output_tensor);
+  {
+    ScopedTimer timer("create row_ptr acl tensor");
+    CreateAclTensorOnDevice(
+        row_ptr_i32, {static_cast<int64_t>(row_ptr_i32.size())}, &row_ptr_dev,
+        aclDataType::ACL_INT32, &row_ptr_tensor);
+  }
+  {
+    ScopedTimer timer("create col_ind acl tensor");
+    CreateAclTensorOnDevice(
+        col_ind_i32, {static_cast<int64_t>(col_ind_i32.size())}, &col_ind_dev,
+        aclDataType::ACL_INT32, &col_ind_tensor);
+  }
+  std::vector<int32_t> seeds_i32;
+  if constexpr (std::is_same<IdType, int32_t>::value) {
+    ScopedTimer timer("wrap int32 seeds acl tensor");
+    seeds_tensor = CreateAclTensorFromDevice(
+        seeds->data, {num_seeds}, aclDataType::ACL_INT32);
+  } else {
+    ScopedTimer timer("convert and create int64 seeds acl tensor");
+    seeds_i32 = CopyIdArrayToHostInt32<IdType>(seeds);
+    CreateAclTensorOnDevice(
+        seeds_i32, {num_seeds}, &seeds_dev, aclDataType::ACL_INT32,
+        &seeds_tensor);
+  }
+  {
+    ScopedTimer timer("create metapath acl tensor");
+    CreateAclTensorOnDevice(
+        metapath_i32, {max_num_steps}, &metapath_dev, aclDataType::ACL_INT32,
+        &metapath_tensor);
+  }
+  {
+    ScopedTimer timer("create random acl tensor");
+    CreateAclTensorOnDevice(
+        random_i32, {num_seeds * max_num_steps}, &random_dev,
+        aclDataType::ACL_INT32, &random_tensor);
+  }
+  {
+    ScopedTimer timer("wrap output traces acl tensor");
+    output_tensor = CreateAclTensorFromDevice(
+        traces->data, output_shape, aclDataType::ACL_INT32);
+  }
 
   uint64_t workspace_size = 0;
   aclOpExecutor* executor = nullptr;
-  ACLNN_CHECK(aclnnRandomWalkCustomGetWorkspaceSize(
-      seeds_tensor, row_ptr_tensor, col_ind_tensor, metapath_tensor,
-      random_tensor, output_tensor, &workspace_size, &executor));
+  {
+    ScopedTimer timer("aclnn get workspace size");
+    ACLNN_CHECK(aclnnRandomWalkCustomGetWorkspaceSize(
+        seeds_tensor, row_ptr_tensor, col_ind_tensor, metapath_tensor,
+        random_tensor, output_tensor, &workspace_size, &executor));
+  }
 
   void* workspace = nullptr;
   if (workspace_size > 0) {
+    ScopedTimer timer("acl malloc workspace");
     ACL_CHECK(aclrtMalloc(&workspace, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST));
   }
 
-  ACLNN_CHECK(aclnnRandomWalkCustom(workspace, workspace_size, executor, stream));
-  ACL_CHECK(aclrtSynchronizeStream(stream));
-
-  ACL_CHECK(aclrtMemcpy(
-      output_i32.data(), output_i32.size() * sizeof(int32_t), output_dev,
-      output_i32.size() * sizeof(int32_t), ACL_MEMCPY_DEVICE_TO_HOST));
-
-  if (workspace != nullptr) {
-    aclrtFree(workspace);
+  {
+    ScopedTimer timer("aclnn random walk submit and sync");
+    aclrtEvent start_event = nullptr;
+    aclrtEvent end_event = nullptr;
+    ACL_CHECK(aclrtCreateEvent(&start_event));
+    ACL_CHECK(aclrtCreateEvent(&end_event));
+    ACL_CHECK(aclrtRecordEvent(start_event, stream));
+    ACLNN_CHECK(aclnnRandomWalkCustom(workspace, workspace_size, executor, stream));
+    ACL_CHECK(aclrtRecordEvent(end_event, stream));
+    ACL_CHECK(aclrtSynchronizeEvent(end_event));
+    float kernel_ms = 0.0f;
+    ACL_CHECK(aclrtEventElapsedTime(&kernel_ms, start_event, end_event));
+    LOG(INFO) << "[RandomWalk NPU][TIME] kernel event: " << kernel_ms << " ms";
+    ACL_CHECK(aclrtDestroyEvent(start_event));
+    ACL_CHECK(aclrtDestroyEvent(end_event));
   }
-  DestroyAclTensor(output_tensor, output_dev);
-  DestroyAclTensor(random_tensor, random_dev);
-  DestroyAclTensor(metapath_tensor, metapath_dev);
-  DestroyAclTensor(seeds_tensor, seeds_dev);
-  DestroyAclTensor(col_ind_tensor, col_ind_dev);
-  DestroyAclTensor(row_ptr_tensor, row_ptr_dev);
-  aclrtDestroyStream(stream);
 
-  IdArray traces =
-      IdArray::Empty({num_seeds, trace_length}, seeds->dtype, ctx);
-  IdArray eids =
-      IdArray::Empty({num_seeds, max_num_steps}, seeds->dtype, ctx);
-
-  std::vector<IdType> traces_host(static_cast<size_t>(num_seeds * trace_length));
-  for (int64_t seed = 0; seed < num_seeds; ++seed) {
-    for (int64_t hop = 0; hop < trace_length; ++hop) {
-      traces_host[static_cast<size_t>(seed * trace_length + hop)] =
-          static_cast<IdType>(
-              output_i32[static_cast<size_t>(seed * trace_length + hop)]);
+  {
+    ScopedTimer timer("destroy acl tensors and stream");
+    if (workspace != nullptr) {
+      aclrtFree(workspace);
     }
+    DestroyAclTensor(output_tensor, nullptr);
+    DestroyAclTensor(random_tensor, random_dev);
+    DestroyAclTensor(metapath_tensor, metapath_dev);
+    DestroyAclTensor(seeds_tensor, seeds_dev);
+    DestroyAclTensor(col_ind_tensor, col_ind_dev);
+    DestroyAclTensor(row_ptr_tensor, row_ptr_dev);
+    aclrtDestroyStream(stream);
   }
 
-  std::vector<IdType> eids_host(static_cast<size_t>(num_seeds * max_num_steps), -1);
+  std::vector<int32_t> eids_host(static_cast<size_t>(num_seeds * max_num_steps), -1);
 
-  CopyToDevice(
-      traces->data, ctx, traces_host.data(), static_cast<size_t>(traces_host.size()));
-  CopyToDevice(
-      eids->data, ctx, eids_host.data(), static_cast<size_t>(eids_host.size()));
+  {
+    ScopedTimer timer("copy eids to device");
+    CopyToDevice(
+        eids->data, ctx, eids_host.data(), static_cast<size_t>(eids_host.size()));
+  }
 
   return std::make_pair(traces, eids);
 }
@@ -305,11 +397,12 @@ template <DGLDeviceType XPU, typename IdType>
 TypeArray GetNodeTypesFromMetapath(
     const HeteroGraphPtr hg, const TypeArray metapath) {
   uint64_t num_etypes = metapath->shape[0];
+  DGLDataType int32_dtype = DGLDataType{kDGLInt, 32, 1};
   TypeArray result = TypeArray::Empty(
-      {metapath->shape[0] + 1}, metapath->dtype, metapath->ctx);
+      {metapath->shape[0] + 1}, int32_dtype, metapath->ctx);
 
   const IdType* metapath_data = metapath.Ptr<IdType>();
-  IdType* result_data = result.Ptr<IdType>();
+  int32_t* result_data = result.Ptr<int32_t>();
 
   dgl_type_t curr_type = hg->GetEndpointTypes(metapath_data[0]).first;
   result_data[0] = curr_type;
@@ -325,7 +418,7 @@ TypeArray GetNodeTypesFromMetapath(
       return result;
     }
     curr_type = dsttype;
-    result_data[i + 1] = dsttype;
+    result_data[i + 1] = static_cast<int32_t>(dsttype);
   }
   return result;
 }
